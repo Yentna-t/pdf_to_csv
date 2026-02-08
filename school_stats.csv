@@ -1,0 +1,2 @@
+SchoolID,SchoolName,Province,AcademicYear,ExamCenter,People_Total,Male,Female,Score_GTE_45,Score_35_to_45,Score_25_to_35,Score_LT_25,Male_GTE_45,Male_35_to_45,Male_25_to_35,Male_LT_25,Female_GTE_45,Female_35_to_45,Female_25_to_35,Female_LT_25
+1,ມສ ສີທອງ,ນະຄອນຫຼວງວຽງຈັນ,2024-2025,ມສ ສີທອງ,8,3,5,0,0,0,5,0,0,0,1,0,0,0,3
