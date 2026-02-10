@@ -92,31 +92,77 @@ class PDFSchoolExtractor:
         height, width, _ = img_cv.shape
         roi_start_y = int(height * 0.15) # Skip header
         
-        # Scope for gender columns
-        roi_x1 = int(width * 0.120)
-        roi_x2 = int(width * 0.155)
+        # 1. Wide Safety Crop (Handle significant table shifts)
+        roi_x1 = int(width * 0.05)
+        roi_x2 = int(width * 0.30)
         
-        gender_roi = img_cv[roi_start_y:height, roi_x1:roi_x2]
-        roi_h, roi_w, _ = gender_roi.shape
-        mid_x = roi_w // 2
-
-        hsv = cv2.cvtColor(gender_roi, cv2.COLOR_BGR2HSV)
+        full_roi = img_cv[roi_start_y:height, roi_x1:roi_x2]
+        roi_h, roi_w, _ = full_roi.shape
+        
+        # 2. Extract Red Masks (The checkmarks are our guide)
+        hsv = cv2.cvtColor(full_roi, cv2.COLOR_BGR2HSV)
         lower_red1 = np.array([0, 40, 40])
         upper_red1 = np.array([15, 255, 255])
         lower_red2 = np.array([160, 40, 40])
         upper_red2 = np.array([180, 255, 255])
         mask = cv2.add(cv2.inRange(hsv, lower_red1, upper_red1), cv2.inRange(hsv, lower_red2, upper_red2))
-
-        kernel = np.ones((3, 3), np.uint8)
-        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
-        mask = cv2.morphologyEx(mask, cv2.MORPH_DILATE, kernel)
-
-        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-
-        students = []
-        debug_roi = gender_roi.copy() if self.debug else None
         
-        for cnt in contours:
+        kernel = np.ones((3, 3), np.uint8)
+        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel, iterations=1)
+        mask = cv2.morphologyEx(mask, cv2.MORPH_DILATE, kernel, iterations=1)
+
+        # 3. Find vertical grid lines
+        mid_x, left_lock, right_lock = roi_w // 2, 0, roi_w
+        try:
+            gray_roi = cv2.cvtColor(full_roi, cv2.COLOR_BGR2GRAY)
+            thresh_roi = cv2.adaptiveThreshold(gray_roi, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, 
+                                             cv2.THRESH_BINARY_INV, 31, 15)
+            line_k = cv2.getStructuringElement(cv2.MORPH_RECT, (1, int(roi_h * 0.15)))
+            v_lines = cv2.morphologyEx(thresh_roi, cv2.MORPH_OPEN, line_k)
+            projection = np.sum(v_lines, axis=0)
+            
+            peaks = []
+            for x in range(2, roi_w - 2):
+                if projection[x] > (roi_h * 0.05 * 255) and projection[x] == np.max(projection[x-2:x+3]):
+                    if not peaks or (x - peaks[-1]) > 5: peaks.append(x)
+
+            # 4. Use checkmark centroids to pick the correct triplet
+            c_contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            c_x = []
+            for c in c_contours:
+                if cv2.contourArea(c) > 8:
+                    M = cv2.moments(c)
+                    if M["m00"] != 0:
+                        c_x.append(int(M["m10"] / M["m00"]))
+
+            if len(peaks) >= 3 and c_x:
+                avg_x = np.median(c_x)
+                best, min_d = None, 9999
+                for i in range(len(peaks)-2):
+                    if 15 < (peaks[i+1]-peaks[i]) < 80 and 15 < (peaks[i+2]-peaks[i+1]) < 80:
+                        d = abs((peaks[i]+peaks[i+2])/2 - avg_x)
+                        if d < min_d: min_d, best = d, (peaks[i], peaks[i+1], peaks[i+2])
+                if best: left_lock, mid_x, right_lock = best
+            elif len(peaks) >= 2 and c_x:
+                mid_x = min(peaks, key=lambda p: abs(p - np.median(c_x)))
+        except: pass
+
+        # 5. Filter mask to locked columns
+        l_mask = np.zeros_like(mask)
+        l_mask[:, max(0, left_lock-2):min(roi_w, right_lock+2)] = 255
+        mask = cv2.bitwise_and(mask, l_mask)
+
+        processed_contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        students = []
+        debug_roi = full_roi.copy() if self.debug else None
+        
+        # Draw the detected grid lines (Yellow)
+        if self.debug:
+            cv2.line(debug_roi, (left_lock, 0), (left_lock, roi_h), (0, 255, 255), 1)
+            cv2.line(debug_roi, (mid_x, 0), (mid_x, roi_h), (0, 255, 255), 2)
+            cv2.line(debug_roi, (right_lock, 0), (right_lock, roi_h), (0, 255, 255), 1)
+
+        for cnt in processed_contours:
             area = cv2.contourArea(cnt)
             if area < 10: continue
 
@@ -394,6 +440,7 @@ class PDFSchoolExtractor:
 
     
     def process_page(self, page_info: Tuple[int, Image.Image]) -> SchoolData:
+        start_time_page = time.perf_counter()
         page_num, image = page_info
         data = SchoolData()
         try:
@@ -427,7 +474,9 @@ class PDFSchoolExtractor:
                 })
 
             if self.debug:
-                print(f"  ✓ Page {page_num}: Genders:{len(genders)}, Matched:{matched_count}, School: {data.school_name}")
+                duration = (time.perf_counter() - start_time_page) * 1000
+                current_time = time.strftime("%H:%M:%S")
+                print(f"  [{current_time}] ✓ Page {page_num}: Genders:{len(genders)}, Matched:{matched_count}, School: {data.school_name} ({duration:.0f}ms)")
                 vis_img = cv2.cvtColor(np.array(image), cv2.COLOR_RGB2BGR)
                 for r in data.student_records:
                     gp = r['g_pos']
